@@ -21,63 +21,95 @@ import { IndirectLightingSystem } from './interface.js';
 // 3-band RGB SH = 27 floats
 const SH_FLOATS = 27;
 
-function zeroSH() {
+function zeroSphericalHarmonics() {
   return new Float32Array(SH_FLOATS);
 }
 
-/** Copy RGB SH from an array (ordered R0..R8, G0..G8, B0..B8) */
-function copySH(src) {
-  const dst = new Float32Array(SH_FLOATS);
-  dst.set(src);
-  return dst;
+function copySphericalHarmonics(source) {
+  const destination = new Float32Array(SH_FLOATS);
+  destination.set(source);
+  return destination;
 }
 
-/** Add src multiplied by weight into dst (dst += src * w) */
-function accumulateSH(dst, src, w) {
-  for (let k = 0; k < SH_FLOATS; k++) dst[k] += src[k] * w;
+/** Add source multiplied by weight into destination (destination += source * weight) */
+function accumulateSphericalHarmonics(destination, source, weight) {
+  for (let index = 0; index < SH_FLOATS; index++) {
+    destination[index] += source[index] * weight;
+  }
 }
 
 /** 3×3 matrix inverse (for precomputed tet matrices) */
-function inv3x3(m) {
-  // m = [e1x, e1y, e1z, e2x, e2y, e2z, e3x, e3y, e3z]
-  const [a,b,c, d,e,f, g,h,i] = m;
-  const det = a*(e*i-f*h) - b*(d*i-f*g) + c*(d*h-e*g);
-  if (Math.abs(det) < 1e-12) return null;
-  const inv = 1/det;
+function inverseMatrix3x3(matrix) {
+  const [a, b, c, d, e, f, g, h, i] = matrix;
+  const determinant =
+    a * (e * i - f * h) -
+    b * (d * i - f * g) +
+    c * (d * h - e * g);
+  if (Math.abs(determinant) < 1e-12) {
+    return null;
+  }
+  const inverseDeterminant = 1 / determinant;
   return [
-    (e*i-f*h)*inv, -(b*i-c*h)*inv,  (b*f-c*e)*inv,
-    -(d*i-f*g)*inv,  (a*i-c*g)*inv, -(a*f-c*d)*inv,
-    (d*h-e*g)*inv, -(a*h-b*g)*inv,  (a*e-b*d)*inv,
+    (e * i - f * h) * inverseDeterminant,
+    -(b * i - c * h) * inverseDeterminant,
+    (b * f - c * e) * inverseDeterminant,
+    -(d * i - f * g) * inverseDeterminant,
+    (a * i - c * g) * inverseDeterminant,
+    -(a * f - c * d) * inverseDeterminant,
+    (d * h - e * g) * inverseDeterminant,
+    -(a * h - b * g) * inverseDeterminant,
+    (a * e - b * d) * inverseDeterminant,
   ];
 }
 
 /**
- * Precompute the tet matrix M such that:
+ * Precompute the tetrahedron matrix M such that:
  *   [λ₁, λ₂, λ₃] = M · (P - v0)
  *   λ₀ = 1 - λ₁ - λ₂ - λ₃
  *
- * M is the inverse of the 3×3 matrix whose columns are (v1-v0, v2-v0, v3-v0).
+ * M is the inverse of the 3×3 matrix whose columns are (v1 - v0, v2 - v0, v3 - v0).
  */
-function computeTetMatrix(v0, v1, v2, v3) {
-  const e1 = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
-  const e2 = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
-  const e3 = [v3[0]-v0[0], v3[1]-v0[1], v3[2]-v0[2]];
-  // Matrix is column-major: cols are e1, e2, e3
-  const mat = [e1[0], e1[1], e1[2], e2[0], e2[1], e2[2], e3[0], e3[1], e3[2]];
-  return inv3x3(mat);
+function computeTetrahedronMatrix(v0, v1, v2, v3) {
+  const edge1 = [
+    v1[0] - v0[0],
+    v1[1] - v0[1],
+    v1[2] - v0[2],
+  ];
+  const edge2 = [
+    v2[0] - v0[0],
+    v2[1] - v0[1],
+    v2[2] - v0[2],
+  ];
+  const edge3 = [
+    v3[0] - v0[0],
+    v3[1] - v0[1],
+    v3[2] - v0[2],
+  ];
+  // Matrix stored column-major: columns are edge1, edge2, edge3
+  const columnMajorMatrix = [
+    edge1[0], edge1[1], edge1[2],
+    edge2[0], edge2[1], edge2[2],
+    edge3[0], edge3[1], edge3[2],
+  ];
+  return inverseMatrix3x3(columnMajorMatrix);
 }
 
 /**
- * Compute barycentric coordinates using precomputed tet matrix.
+ * Compute barycentric coordinates using precomputed tetrahedron matrix.
  * Returns [λ₀, λ₁, λ₂, λ₃] or null if degenerate.
  */
-function baryFromMatrix(P, v0, M) {
-  const dx = P[0] - v0[0], dy = P[1] - v0[1], dz = P[2] - v0[2];
-  const l1 = M[0]*dx + M[3]*dy + M[6]*dz;   // row 0 · (P-v0)
-  const l2 = M[1]*dx + M[4]*dy + M[7]*dz;   // row 1 · (P-v0)
-  const l3 = M[2]*dx + M[5]*dy + M[8]*dz;   // row 2 · (P-v0)
-  const l0 = 1 - l1 - l2 - l3;
-  return [l0, l1, l2, l3];
+function barycentricFromMatrix(worldPosition, vertex0, matrix) {
+  const deltaX = worldPosition[0] - vertex0[0];
+  const deltaY = worldPosition[1] - vertex0[1];
+  const deltaZ = worldPosition[2] - vertex0[2];
+  const lambda1 =
+    matrix[0] * deltaX + matrix[3] * deltaY + matrix[6] * deltaZ;
+  const lambda2 =
+    matrix[1] * deltaX + matrix[4] * deltaY + matrix[7] * deltaZ;
+  const lambda3 =
+    matrix[2] * deltaX + matrix[5] * deltaY + matrix[8] * deltaZ;
+  const lambda0 = 1 - lambda1 - lambda2 - lambda3;
+  return [lambda0, lambda1, lambda2, lambda3];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -98,18 +130,18 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
 
     /**
      * @type {{
-     *   v:number[],       // 4 vertex indices
-     *   n:number[],       // 4 neighbour indices (same pos as opposite vertex)
-     *   M:number[]|null,  // precomputed 3×3 matrix (9 floats)
+     *   vertexIndices:number[],       // 4 vertex indices
+     *   neighbourIndices:number[],    // 4 neighbour indices
+     *   precomputedMatrix:number[]|null,  // 3×3 matrix (9 floats)
      * }[]}
      */
     this.tets = [];
 
     // Cache for temporal coherence
-    this._tetIndex   = 0;
-    this._tetDirty   = true;
-    this.lastBary   = null;
-    this.lastTetIdx = -1;
+    this._tetrahedronIndex = 0;
+    this._tetrahedronIndexDirty = true;
+    this.lastBarycentric = null;
+    this.lastTetrahedronIndex = -1;
   }
 
   // ─── Initialisation ────────────────────────────────────────────────────
@@ -132,61 +164,74 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
     const sz = (ex[2] - bx[2]) / gridZ;
 
     // Create probes at grid vertices
-    const idx = (ix, iy, iz) => iz * (nx * ny) + iy * nx + ix;
+    const indexMap = (ix, iy, iz) => iz * (nx * ny) + iy * nx + ix;
     const numProbes = nx * ny * nz;
     this.probes = new Array(numProbes);
     for (let iz = 0; iz < nz; iz++)
       for (let iy = 0; iy < ny; iy++)
         for (let ix = 0; ix < nx; ix++)
-          this.probes[idx(ix, iy, iz)] = {
+          this.probes[indexMap(ix, iy, iz)] = {
             pos: [bx[0] + ix * sx, bx[1] + iy * sy, bx[2] + iz * sz],
-            sh: zeroSH(),
+            sh: zeroSphericalHarmonics(),
           };
 
-    // Build all tet definitions (6 per cell)
-    const tetDefs = [];
-    const _6tets = (v) => [
-      { v: [v[0], v[1], v[3], v[7]] },
-      { v: [v[0], v[1], v[5], v[7]] },
-      { v: [v[0], v[2], v[3], v[7]] },
-      { v: [v[0], v[2], v[6], v[7]] },
-      { v: [v[0], v[4], v[5], v[7]] },
-      { v: [v[0], v[4], v[6], v[7]] },
+    // Build all tetrahedron definitions (6 per cell)
+    const tetrahedronDefs = [];
+    const createCellTetrahedra = (vertexIndices) => [
+      { vertexIndices: [vertexIndices[0], vertexIndices[1], vertexIndices[3], vertexIndices[7]] },
+      { vertexIndices: [vertexIndices[0], vertexIndices[1], vertexIndices[5], vertexIndices[7]] },
+      { vertexIndices: [vertexIndices[0], vertexIndices[2], vertexIndices[3], vertexIndices[7]] },
+      { vertexIndices: [vertexIndices[0], vertexIndices[2], vertexIndices[6], vertexIndices[7]] },
+      { vertexIndices: [vertexIndices[0], vertexIndices[4], vertexIndices[5], vertexIndices[7]] },
+      { vertexIndices: [vertexIndices[0], vertexIndices[4], vertexIndices[6], vertexIndices[7]] },
     ];
 
     for (let iz = 0; iz < gridZ; iz++)
       for (let iy = 0; iy < gridY; iy++)
         for (let ix = 0; ix < gridX; ix++) {
-          const v = [
-            idx(ix,   iy,   iz),   // 0
-            idx(ix+1, iy,   iz),   // 1
-            idx(ix,   iy+1, iz),   // 2
-            idx(ix+1, iy+1, iz),   // 3
-            idx(ix,   iy,   iz+1), // 4
-            idx(ix+1, iy,   iz+1), // 5
-            idx(ix,   iy+1, iz+1), // 6
-            idx(ix+1, iy+1, iz+1), // 7
+          const cellVertexIndices = [
+            indexMap(ix,   iy,   iz),
+            indexMap(ix+1, iy,   iz),
+            indexMap(ix,   iy+1, iz),
+            indexMap(ix+1, iy+1, iz),
+            indexMap(ix,   iy,   iz+1),
+            indexMap(ix+1, iy,   iz+1),
+            indexMap(ix,   iy+1, iz+1),
+            indexMap(ix+1, iy+1, iz+1),
           ];
-          tetDefs.push(..._6tets(v));
+          tetrahedronDefs.push(...createCellTetrahedra(cellVertexIndices));
         }
 
     // Neighbour adjacency
-    const findOpposite = (tets, ti, k) => {
-      const face = tets[ti].v.filter((_, i) => i !== k);
-      for (let ni = 0; ni < tets.length; ni++) {
-        if (ni === ti) continue;
-        const ov = tets[ni].v;
-        if (face.every(v => ov.includes(v))) return ni;
+    const findOpposite = (definitions, definitionIndex, vertexPosition) => {
+      const faceVertices = definitions[definitionIndex].vertexIndices
+        .filter((_, i) => i !== vertexPosition);
+      for (let neighbourIndex = 0; neighbourIndex < definitions.length; neighbourIndex++) {
+        if (neighbourIndex === definitionIndex) {
+          continue;
+        }
+        const otherVertices = definitions[neighbourIndex].vertexIndices;
+        if (faceVertices.every(vertex => otherVertices.includes(vertex))) {
+          return neighbourIndex;
+        }
       }
       return -1;
     };
 
-    this.tets = tetDefs.map((d, i) => {
-      const n = d.v.map((_, k) => findOpposite(tetDefs, i, k));
-      const pos = this.probes;
-      const v0 = pos[d.v[0]].pos, v1 = pos[d.v[1]].pos, v2 = pos[d.v[2]].pos, v3 = pos[d.v[3]].pos;
-      const M = computeTetMatrix(v0, v1, v2, v3);
-      return { v: [...d.v], n, M };
+    this.tets = tetrahedronDefs.map((definition, definitionIndex) => {
+      const neighbourIndices = definition.vertexIndices
+        .map((_, vertexPosition) => findOpposite(tetrahedronDefs, definitionIndex, vertexPosition));
+      const probePositions = this.probes;
+      const v0 = probePositions[definition.vertexIndices[0]].pos;
+      const v1 = probePositions[definition.vertexIndices[1]].pos;
+      const v2 = probePositions[definition.vertexIndices[2]].pos;
+      const v3 = probePositions[definition.vertexIndices[3]].pos;
+      const precomputedMatrix = computeTetrahedronMatrix(v0, v1, v2, v3);
+      return {
+        vertexIndices: [...definition.vertexIndices],
+        neighbourIndices,
+        precomputedMatrix,
+      };
     });
   }
 
@@ -195,66 +240,77 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
   /**
    * Find the tetrahedron containing world-space position P.
    *
-   * Uses a neighbour-walk starting from the cached tetIndex for temporal
-   * coherence.  Returns the tet index, or -1 if outside the entire mesh.
+   * Uses a neighbour-walk starting from the cached tetrahedronIndex for
+   * temporal coherence.  Returns the tetrahedron index, or -1 if outside
+   * the entire mesh.
    *
    * Algorithm:
    *   1. Compute barycentric coords via precomputed matrix
    *   2. If all λ ≥ 0 → inside; return
    *   3. Otherwise, step through the neighbour of the most-negative λ
-   *   4. Repeat (bounded by max iteration = num tets)
+   *   4. Repeat (bounded by max iteration = num tetrahedra)
    */
-  findTetrahedron(P) {
-    const { tets } = this;
-    if (tets.length === 0) return -1;
+  findTetrahedron(worldPosition) {
+    const tetrahedra = this.tets;
+    if (tetrahedra.length === 0) {
+      return -1;
+    }
 
     // Start from cached index (or 0 on first call)
-    let ti = this._tetDirty ? 0 : this._tetIndex;
-    this._tetDirty = false;
+    let tetrahedronIndex = this._tetrahedronIndexDirty
+      ? 0
+      : this._tetrahedronIndex;
+    this._tetrahedronIndexDirty = false;
 
-    const maxIter = tets.length + 1;
-    for (let iter = 0; iter < maxIter; iter++) {
-      const tet = tets[ti];
-      if (!tet.M) { ti = (ti + 1) % tets.length; continue; }
+    const maxIterations = tetrahedra.length + 1;
+    for (let iteration = 0; iteration < maxIterations; iteration++) {
+      const tetrahedron = tetrahedra[tetrahedronIndex];
+      if (!tetrahedron.precomputedMatrix) {
+        tetrahedronIndex = (tetrahedronIndex + 1) % tetrahedra.length;
+        continue;
+      }
 
-      const v0 = this.probes[tet.v[0]].pos;
-      const bary = baryFromMatrix(P, v0, tet.M);
+      const vertex0 = this.probes[tetrahedron.vertexIndices[0]].pos;
+      const barycentric = barycentricFromMatrix(
+        worldPosition,
+        vertex0,
+        tetrahedron.precomputedMatrix
+      );
 
-      let inside = true;
-      let worst = 0;       // most-negative value
-      let worstK = -1;     // which bary coord
+      let isInside = true;
+      let mostNegativeValue = 0;
+      let mostNegativeIndex = -1;
 
-      for (let k = 0; k < 4; k++) {
-        if (bary[k] < -1e-7) {  // small epsilon to avoid oscillation
-          inside = false;
-          if (bary[k] < worst) { worst = bary[k]; worstK = k; }
+      for (let coordIndex = 0; coordIndex < 4; coordIndex++) {
+        if (barycentric[coordIndex] < -1e-7) {
+          isInside = false;
+          if (barycentric[coordIndex] < mostNegativeValue) {
+            mostNegativeValue = barycentric[coordIndex];
+            mostNegativeIndex = coordIndex;
+          }
         }
       }
 
-      if (inside) {
-        // Cache and return
-        this._tetIndex = ti;
-        this.lastTetIdx = ti;
-        this.lastBary = bary;
-        return ti;
+      if (isInside) {
+        this._tetrahedronIndex = tetrahedronIndex;
+        this.lastTetrahedronIndex = tetrahedronIndex;
+        this.lastBarycentric = barycentric;
+        return tetrahedronIndex;
       }
 
-      // Walk to neighbour across the face opposite worstK
-      const next = tet.n[worstK];
-      if (next < 0 || next >= tets.length) {
-        // Boundary hit — clamp to nearest face
-        // Return -1 for now; caller decides fallback
-        this.lastTetIdx = -1;
-        this.lastBary = null;
+      // Walk to neighbour across the face opposite the most negative coordinate
+      const nextIndex = tetrahedron.neighbourIndices[mostNegativeIndex];
+      if (nextIndex < 0 || nextIndex >= tetrahedra.length) {
+        this.lastTetrahedronIndex = -1;
+        this.lastBarycentric = null;
         return -1;
       }
-      ti = next;
+      tetrahedronIndex = nextIndex;
     }
 
-    // Should not reach here (mesh is disconnected or malformed)
     console.warn('[TET] Search exceeded max iterations');
-    this.lastTetIdx = -1;
-    this.lastBary = null;
+    this.lastTetrahedronIndex = -1;
+    this.lastBarycentric = null;
     return -1;
   }
 
@@ -269,25 +325,39 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
    * Returns { sh: Float32Array(27), tetIndex: number, bary: number[]|null }
    * On failure, sh is zeros and tetIndex is -1.
    */
-  interpolateAt(P) {
-    const tetIdx = this.findTetrahedron(P);
+  interpolateAt(worldPosition) {
+    const tetrahedronIndex = this.findTetrahedron(worldPosition);
 
-    if (tetIdx < 0) {
-      // Outside mesh — fallback: nearest-neighbour or zero
-      return { sh: zeroSH(), tetIndex: -1, bary: null };
+    if (tetrahedronIndex < 0) {
+      return {
+        sh: zeroSphericalHarmonics(),
+        tetIndex: -1,
+        bary: null,
+      };
     }
 
-    const tet = this.tets[tetIdx];
-    const v0 = this.probes[tet.v[0]].pos;
-    const bary = baryFromMatrix(P, v0, tet.M);
+    const tetrahedron = this.tets[tetrahedronIndex];
+    const vertex0 = this.probes[tetrahedron.vertexIndices[0]].pos;
+    const barycentric = barycentricFromMatrix(
+      worldPosition,
+      vertex0,
+      tetrahedron.precomputedMatrix
+    );
 
-    // Accumulate SH from 4 corner probes
-    const sh = zeroSH();
-    for (let k = 0; k < 4; k++) {
-      accumulateSH(sh, this.probes[tet.v[k]].sh, bary[k]);
+    const sphericalHarmonics = zeroSphericalHarmonics();
+    for (let vertexIndex = 0; vertexIndex < 4; vertexIndex++) {
+      accumulateSphericalHarmonics(
+        sphericalHarmonics,
+        this.probes[tetrahedron.vertexIndices[vertexIndex]].sh,
+        barycentric[vertexIndex]
+      );
     }
 
-    return { sh, tetIndex: tetIdx, bary };
+    return {
+      sh: sphericalHarmonics,
+      tetIndex: tetrahedronIndex,
+      bary: barycentric,
+    };
   }
 
   // ─── GL binding ────────────────────────────────────────────────────────
@@ -300,9 +370,6 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
    *   vec3 evalSH(vec3 dir) { ... }
    */
   bindInterpolated(gl, program, shArray) {
-    // Upload 9×vec3 — GLSL expects:
-    //   uniform vec3 uSH[9];
-    // Data layout: R0,G0,B0,  R1,G1,B1,  ..., R8,G8,B8
     gl.uniform3fv(gl.getUniformLocation(program, 'uSH'), shArray);
   }
 
@@ -315,7 +382,7 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
    * ctx: { gl, pProbe, pProject, sceneVAOs, qVAO, lightPos, lightCol, res }
    */
   precompute(gl, ctx) {
-    const { pProbe, pProject, sceneVAOs, qVAO, res } = ctx;
+    const { pProbe, pProject, sceneVAOs, qVAO, cubemapResolution } = ctx;
     const lPos = ctx.lightPos || [0, 3.5, 0];
     const lCol = ctx.lightCol || [10, 10, 10];
     const sampleCount = ctx.sampleCount || 1024;
@@ -346,7 +413,7 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
       if (ctx.info) ctx.info.textContent = `Tet probe ${pi+1}/${this.probes.length}...`;
 
       // Render cubemap from this probe position
-      const gb = _allocCM(gl, res);
+      const gb = _allocCM(gl, cubemapResolution);
       gl.useProgram(pProbe);
       gl.uniform3fv(gl.getUniformLocation(pProbe, 'uQ'), pp);
       gl.uniform3fv(gl.getUniformLocation(pProbe, 'uLightPos'), lPos);
@@ -357,7 +424,7 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
         _bindCMFace(gl, gb, f);
         const vp = _mul4(persp, _lookAt(pp, [pp[0]+cT[f][0],pp[1]+cT[f][1],pp[2]+cT[f][2]], cU[f]));
         gl.uniformMatrix4fv(gl.getUniformLocation(pProbe, 'uVP'), false, vp);
-        gl.viewport(0, 0, res, res);
+        gl.viewport(0, 0, cubemapResolution, cubemapResolution);
         gl.clearBufferfv(gl.COLOR, 0, blk);
         gl.clearBufferfv(gl.COLOR, 1, blk);
         gl.clearBufferfv(gl.COLOR, 2, farD);
@@ -386,11 +453,11 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
       gl.readPixels(0, 0, 9, 1, gl.RGBA, gl.FLOAT, readBuf);
 
       // Convert readback to interleaved SH layout
-      const sh = zeroSH();
-      for (let b = 0; b < 9; b++) {
-        sh[b*3]   = readBuf[b*4];     // R
-        sh[b*3+1] = readBuf[b*4+1];   // G
-        sh[b*3+2] = readBuf[b*4+2];   // B
+      const sh = zeroSphericalHarmonics();
+      for (let band = 0; band < 9; band++) {
+        sh[band * 3]     = readBuf[band * 4];     // Red channel
+        sh[band * 3 + 1] = readBuf[band * 4 + 1]; // Green channel
+        sh[band * 3 + 2] = readBuf[band * 4 + 2]; // Blue channel
       }
       this.probes[pi].sh = sh;
 
@@ -423,10 +490,10 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
    */
   getDebugInfo() {
     return {
-      tetIndex: this.lastTetIdx,
-      bary: this.lastBary,
-      numTets: this.tets.length,
-      numProbes: this.probes.length,
+      tetrahedronIndex: this.lastTetrahedronIndex,
+      barycentric: this.lastBarycentric,
+      numberOfTetrahedra: this.tets.length,
+      numberOfProbes: this.probes.length,
     };
   }
 }
