@@ -1,10 +1,10 @@
 import * as S from './shaders.js';
 
-const RES = 256;
+const RES = 64;
 const OCT_RES = 256;
 const LOW_RES = 64;
-const NUM_PROBES = 64;
-const PROBE_DIM = 4; // probes per axis: 4×4×4
+const NUM_PROBES = 216; // total probes: 6×6×6
+const PROBE_DIM = 6; // probes per axis: 8×8×8
 
 const $ = document.getElementById.bind(document);
 const info = $('info');
@@ -235,9 +235,8 @@ const probePos = Array.from({length:NUM_PROBES}, (_,i)=>{
 });
 const probePosFlat = new Float32Array(probePos.flat());
 
-// ─── Probe G-buffer cubemaps (with depth cubemap) ────────────────────
-const probeGB = [];
-for (let i = 0; i < NUM_PROBES; i++) {
+// ─── Probe G-buffer cubemap allocation ────────────────────────────────
+function allocProbeGB() {
   const depthCM = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_CUBE_MAP, depthCM);
   for (let j = 0; j < 6; j++) gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X+j, 0, gl.DEPTH_COMPONENT24, RES, RES, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
@@ -246,7 +245,11 @@ for (let i = 0; i < NUM_PROBES; i++) {
   gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
-  probeGB.push({ fbo:gl.createFramebuffer(), rad:cmF16(RES,RES), nrm:cmF16(RES,RES), dist:cmR16F(RES,RES), depthCM });
+  return { fbo:gl.createFramebuffer(), rad:cmF16(RES,RES), nrm:cmF16(RES,RES), dist:cmR16F(RES,RES), depthCM };
+}
+function freeProbeGB(gb) {
+  gl.deleteFramebuffer(gb.fbo);
+  gl.deleteTexture(gb.rad); gl.deleteTexture(gb.nrm); gl.deleteTexture(gb.dist); gl.deleteTexture(gb.depthCM);
 }
 const db3 = [gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2];
 function bindGBFace(fbo, face, r, n, d, depth) {
@@ -286,12 +289,12 @@ const cU=[[0,-1,0],[0,-1,0],[0,0,1],[0,0,-1],[0,-1,0],[0,-1,0]];
 //  PRECOMPUTATION
 // ═══════════════════════════════════════════════════════════════════════
 
-function renderProbeGB(pi) {
-  const pp = probePos[pi], gb = probeGB[pi], proj = persp(Math.PI/2, 1, 0.1, 20);
+function renderProbeGB(gb, pp) {
+  const proj = persp(Math.PI/2, 1, 0.1, 20);
   gl.useProgram(pProbe);
   gl.uniform3fv(ul(pProbe, 'uQ'), pp);
   gl.uniform3fv(ul(pProbe, 'uLightPos'), [0, 3.5, 0]);
-  gl.uniform3fv(ul(pProbe, 'uLightCol'), [1, 1, 1]);
+  gl.uniform3fv(ul(pProbe, 'uLightCol'), [20, 20, 20]);
   gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.disable(gl.CULL_FACE);
   const blk = new Float32Array([0, 0, 0, 1]);
   const farDist = new Float32Array([20, 0, 0, 0]);
@@ -308,22 +311,21 @@ function renderProbeGB(pi) {
   }
 }
 
-function makeOctPass(pi, cm, arr, prog, uniformFns) {
+function makeOctPass(layer, cm, arr, prog, nrmCM, distCM) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, layerFBO);
-  gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, arr, 0, pi);
+  gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, arr, 0, layer);
   gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
   gl.viewport(0,0,OW,OH); gl.disable(gl.DEPTH_TEST);
   gl.useProgram(prog);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_CUBE_MAP, cm);
   gl.uniform1i(ul(prog, 'uRad'), 0);
   if (prog === pOct) {
-    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_CUBE_MAP, probeGB[pi].nrm);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_CUBE_MAP, nrmCM);
     gl.uniform1i(ul(prog, 'uNrm'), 1);
-    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_CUBE_MAP, probeGB[pi].dist);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_CUBE_MAP, distCM);
     gl.uniform1i(ul(prog, 'uDist'), 2);
   }
   if (prog === pIrr) gl.uniform1i(ul(prog, 'uN'), 1024);
-  if (uniformFns) uniformFns();
   const st = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
   if (st !== gl.FRAMEBUFFER_COMPLETE) console.error('FBO inc:', st);
   gl.bindVertexArray(qVAO); gl.drawArrays(gl.TRIANGLES,0,6); gl.bindVertexArray(null);
@@ -332,10 +334,11 @@ function makeOctPass(pi, cm, arr, prog, uniformFns) {
 function precompute() {
   for (let i = 0; i < NUM_PROBES; i++) {
     info.textContent = `Precomputing ${i+1}/${NUM_PROBES}...`;
-    renderProbeGB(i);
+    const gb = allocProbeGB();
+    renderProbeGB(gb, probePos[i]);
 
     // High-res octahedral distance → distHArr
-    makeOctPass(i, probeGB[i].dist, distHArr, pOct);
+    makeOctPass(i, gb.dist, distHArr, pOct, gb.nrm, gb.dist);
 
     // Low-res octahedral distance → distLArr
     gl.bindFramebuffer(gl.FRAMEBUFFER, layerFBO);
@@ -343,16 +346,16 @@ function precompute() {
     gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
     gl.viewport(0,0,LW,LH); gl.disable(gl.DEPTH_TEST);
     gl.useProgram(pOct);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_CUBE_MAP, probeGB[i].dist);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_CUBE_MAP, gb.dist);
     gl.uniform1i(ul(pOct,'uRad'),0);
-    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_CUBE_MAP, probeGB[i].nrm);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_CUBE_MAP, gb.nrm);
     gl.uniform1i(ul(pOct,'uNrm'),1);
-    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_CUBE_MAP, probeGB[i].dist);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_CUBE_MAP, gb.dist);
     gl.uniform1i(ul(pOct,'uDist'),2);
     gl.bindVertexArray(qVAO); gl.drawArrays(gl.TRIANGLES,0,6); gl.bindVertexArray(null);
 
     // Irradiance filter → irrArr
-    makeOctPass(i, probeGB[i].rad, irrArr, pIrr);
+    makeOctPass(i, gb.rad, irrArr, pIrr, null, null);
 
     // VSM filter → vsmArr
     gl.bindFramebuffer(gl.FRAMEBUFFER, layerFBO);
@@ -360,9 +363,11 @@ function precompute() {
     gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
     gl.viewport(0,0,OW,OH);
     gl.useProgram(pVSM);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_CUBE_MAP, probeGB[i].dist);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_CUBE_MAP, gb.dist);
     gl.uniform1i(ul(pVSM,'uDist'),0);
     gl.bindVertexArray(qVAO); gl.drawArrays(gl.TRIANGLES,0,6); gl.bindVertexArray(null);
+
+    freeProbeGB(gb);
   }
   info.textContent = `${NUM_PROBES} probes ready.`;
 }
@@ -430,7 +435,7 @@ document.addEventListener('keydown', e => {
     // L+digit chord → texture view mode
     lChord = true;
     if (debugMode < 4 || debugMode > 6) debugMode = 4;
-    const probeMap = [6, 0, 1, 2, 3, 4, 5];
+    const probeMap = [0, 73, 146, 219, 292, 365, 438, 63, 448, 511];
     singleProbe = probeMap[digit] ?? 0;
   } else if (isDigit) {
     const tbl = [

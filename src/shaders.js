@@ -153,7 +153,7 @@ void main() {
 export const raymarchFrag = `#version 300 es
 precision highp float;
 
-#define NPROBES_PER_AXIS 4
+#define NPROBES_PER_AXIS 6
 #define NPROBES (NPROBES_PER_AXIS * NPROBES_PER_AXIS * NPROBES_PER_AXIS)
 
 uniform highp sampler2D uPos;
