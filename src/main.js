@@ -1,10 +1,11 @@
 import * as S from './shaders.js';
+import { VoxelGrid, sceneBounds, voxelizeScene } from './voxel.js';
 
-const RES = 64;
+const RES = 128;
 const OCT_RES = 256;
 const LOW_RES = 64;
-const NUM_PROBES = 216; // total probes: 6×6×6
-const PROBE_DIM = 6; // probes per axis: 8×8×8
+const NUM_PROBES = 64; // total probes: 4x4x4
+const PROBE_DIM = 4; // probes per axis: 4x4x4
 
 const $ = document.getElementById.bind(document);
 const info = $('info');
@@ -203,6 +204,15 @@ const sceneVAOs = (() => {
   }
   return r;
 })();
+
+// ─── CPU voxelization ──────────────────────────────────────────────
+const bounds = sceneBounds(M);
+const VOX = 128;
+console.log(`Voxelizing at ${VOX}^3...`);
+const voxels = voxelizeScene(M, bounds, VOX);
+const occ = voxels.occ.reduce((a,b)=>a+b, 0);
+console.log(`${occ} / ${VOX**3} occupied (${(occ/(VOX**3)*100).toFixed(1)}%)`);
+window.__v = voxels;
 
 // Debug probe sphere VAO (rendered into G-buffer for spatial visualization)
 const debugSphereMesh = sphere(0,0,0, 0.12, 12, 8, 5, 5, 5);
@@ -407,14 +417,12 @@ let yaw = 0, pitch = 0;
 const keys = new Set();
 const camSpeed = 4;
 
-let debugMode = 0;      // 0=normal, 1=octUV, 2=distance, 3=steps, 4-6=texture views, 7=trilinear-only, 8=tw, 9=backface, 10=vis
-let singleProbe = -1;   // -1=all, 0..N-1=single probe only
-let lChord = false;
-const debugLabels = ['normal', 'oct UV', 'dist', 'steps', 'tex:irr', 'tex:dist', 'tex:split', 'trilinear', 'weight', 'backface', 'visibility'];
+let singleProbe = -1;
+let probeCycle = [0,0,0,0,0,0,0,0,0,0];
+
 function updateInfo() {
-  const dbg = debugMode ? ` [debug:${debugLabels[debugMode]}]` : '';
   const sp = singleProbe >= 0 ? ` [probe:${singleProbe}]` : '';
-  info.textContent = (document.pointerLockElement === canvas ? 'Click to release mouse' : `${NUM_PROBES} probes ready. Click for mouse look`) + dbg + sp;
+  info.textContent = (document.pointerLockElement === canvas ? 'Click to release mouse' : `${NUM_PROBES} probes ready`) + sp;
 }
 
 canvas.addEventListener('click', () => canvas.requestPointerLock());
@@ -426,43 +434,19 @@ document.addEventListener('mousemove', e => {
 });
 document.addEventListener('keydown', e => {
   keys.add(e.code);
-  if (e.code === 'KeyL' && !e.repeat) lChord = false;
-
   const digit = parseInt(e.code.replace('Digit', ''));
   const isDigit = !isNaN(digit) && digit >= 0 && digit <= 9;
-
-  if (isDigit && keys.has('KeyL')) {
-    // L+digit chord → texture view mode
-    lChord = true;
-    if (debugMode < 4 || debugMode > 6) debugMode = 4;
-    const probeMap = [0, 73, 146, 219, 292, 365, 438, 63, 448, 511];
-    singleProbe = probeMap[digit] ?? 0;
-  } else if (isDigit) {
-    const tbl = [
-      { d:0, p:6 }, { d:1, p:-1 }, { d:2, p:-1 }, { d:3, p:-1 },
-      { d:0, p:0 }, { d:0, p:1 }, { d:0, p:2 }, { d:0, p:3 },
-      { d:0, p:4 }, { d:0, p:5 },
-    ];
-    debugMode = tbl[digit].d;
-    singleProbe = tbl[digit].p;
+  if (isDigit) {
+    const maxOff = Math.ceil((NUM_PROBES - 1 - digit) / 10);
+    const off = probeCycle[digit];
+    singleProbe = off * 10 + digit;
+    probeCycle[digit] = (off + 1) > maxOff ? 0 : off + 1;
   } else if (e.code === 'KeyR') {
-    debugMode = 0;
     singleProbe = -1;
   }
   updateInfo();
 });
-document.addEventListener('keyup', e => {
-  if (e.code === 'KeyL' && !lChord) {
-    if (debugMode >= 4 && debugMode <= 6) {
-      debugMode = ((debugMode - 3) % 3) + 4;
-    } else {
-      debugMode = 4;
-      if (singleProbe < 0) singleProbe = 0;
-    }
-    updateInfo();
-  }
-  keys.delete(e.code);
-});
+document.addEventListener('keyup', e => { keys.delete(e.code); });
 
 function updateCamera(dt) {
   const cx = Math.cos(yaw), sx = Math.sin(yaw);
@@ -562,7 +546,7 @@ function renderFrame(time) {
   gl.uniform1f(ul(pMarch, 'uAspect'), w/h);
   gl.uniform1f(ul(pMarch, 'uNormalBias'), 0.03);
   gl.uniform1f(ul(pMarch, 'uDistBias'), 0.02);
-  gl.uniform1i(ul(pMarch,'uDebug'), debugMode);
+  gl.uniform1i(ul(pMarch,'uDebug'), 0);
   gl.uniform1i(ul(pMarch,'uSingleProbe'), singleProbe);
 
   gl.bindVertexArray(qVAO); gl.drawArrays(gl.TRIANGLES, 0, 6); gl.bindVertexArray(null);

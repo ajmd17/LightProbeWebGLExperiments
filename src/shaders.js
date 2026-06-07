@@ -74,7 +74,7 @@ void main() {
   vec3 L = normalize(uLightPos - vW);
   float NdotL = max(0.0, dot(N, L));
   float distL = length(uLightPos - vW);
-  float atten = min(1.0 / (1.0 + distL * distL * 0.01), 1.0);
+  float atten = min(1.0 / (1.0 + distL * distL * 0.1), 1.0);
   vec3 direct = uLightCol * NdotL * atten;
   vec3 rad = vC * direct;
   oRad = vec4(rad, 1); oNrm = vec4(N*0.5+0.5, 1); oD = length(vW - uQ);
@@ -125,23 +125,28 @@ void main() {
 }
 `;
 
-// ─── VSM filter ─────────────────────────────────────────────────────
+// ─── VSM filter (disk-sampled cone) ─────────────────────────────────
 export const vsmFrag = `#version 300 es
 precision highp float;
 uniform highp samplerCube uDist;
 in vec2 vUV;
 layout(location=0) out vec4 oV;
 ${octHelpers}
-vec3 ss(int i) {
-  float p = acos(1.0-2.0*float(i+1)/33.0), t = 2.399963*float(i);
-  return vec3(sin(p)*cos(t), sin(p)*sin(t), cos(p));
-}
 void main() {
   vec3 d = octDecode(vUV);
   float dd = texture(uDist, d).r;
   float avg = dd, avgSq = dd*dd;
+
+  vec3 up = abs(d.y) < 0.999 ? vec3(0,1,0) : vec3(1,0,0);
+  vec3 T = normalize(cross(up, d));
+  vec3 B = cross(d, T);
+
+  float coneR = 0.04;
   for (int i = 0; i < 16; i++) {
-    float x = texture(uDist, normalize(d + ss(i)*0.10)).r;
+    float r = sqrt(float(i+1) / 16.0) * coneR;
+    float phi = 2.399963 * float(i);
+    vec3 s = normalize(d + (T * cos(phi) + B * sin(phi)) * r);
+    float x = texture(uDist, s).r;
     avg += x; avgSq += x*x;
   }
   float iN = 1.0/17.0; avg *= iN; avgSq *= iN;
@@ -153,7 +158,7 @@ void main() {
 export const raymarchFrag = `#version 300 es
 precision highp float;
 
-#define NPROBES_PER_AXIS 6
+#define NPROBES_PER_AXIS 4
 #define NPROBES (NPROBES_PER_AXIS * NPROBES_PER_AXIS * NPROBES_PER_AXIS)
 
 uniform highp sampler2D uPos;
@@ -213,24 +218,19 @@ float cheb(float d, float avg, float var) {
   return clamp((p - bias) / max(1.0 - bias, 1e-6), 0.0, 1.0);
 }
 
-// Probe visibility with step counter
+// Probe visibility with continuous occlusion falloff
 float probeVis(vec3 P, vec3 Q, int pi, out int steps) {
   vec3 rdir = normalize(P - Q);
   float dist = max(length(P - Q) - uDistBias, 0.001);
   vec2 uv = octEncode(rdir);
 
-  // VSM Chebyshev visibility
   vec2 vsm = texture(uVSM, vec3(uv, pi)).rg;
   float vis = cheb(dist, vsm.x, vsm.y);
   steps = 1;
-  if (vis < 0.001) return 0.0;
-  if (vis > 0.95) return vis;
 
-  // Refinement: ray-march with resolution swap
   float t = 0.0;
   float marchStep = 0.5;
   bool hires = false;
-  steps = 0;
 
   for (int i = 0; i < 256; i++) {
     if (t >= dist) break;
@@ -238,7 +238,12 @@ float probeVis(vec3 P, vec3 Q, int pi, out int steps) {
     float sd;
     if (hires) {
       sd = texture(uDistH, vec3(uv, pi)).r;
-      if (t - sd + uDistBias > 0.10) return 0.0;
+      float past = t - sd;
+      if (past > -uDistBias) {
+        float occ = clamp((past + uDistBias) / 0.10, 0.0, 1.0);
+        vis *= (1.0 - occ);
+        if (vis < 0.001) return 0.0;
+      }
     } else {
       sd = texture(uDistL, vec3(uv, pi)).r;
       if (t - sd + uDistBias > -0.15) { hires = true; marchStep = 0.05; continue; }
@@ -300,6 +305,7 @@ void main() {
 
   vec3 indirect = vec3(0.0);
   float tw = 0.0;
+  float norm = 0.0;
   vec2 nOct = octEncode(N);
   int maxSteps = 0;
 
@@ -336,7 +342,7 @@ void main() {
     vis = max(0.001, vis);
     vec3 irr = texture(uIrr, vec3(nOct, i)).rgb;
     float w = bf * vis;
-    indirect += irr * w; tw += w;
+    indirect += irr * w; tw += w; norm += 1.0;
     indirectTri = irr; twTri = 1.0;
     dbgBF = bf; dbgVis = vis;
   } else {
@@ -347,6 +353,7 @@ void main() {
       if (weight < 0.001) continue;
       int i = pi[j];
       vec3 Q = uProbePos[i];
+      float radial = smoothstep(0.0, 0.4, length(P - Q));
       vec3 dQ = normalize(Q - P);
       float bf = (dot(N, dQ) + 0.2) / 1.2;
       bf = max(0.001, bf);
@@ -356,7 +363,7 @@ void main() {
       vis = max(0.001, vis);
       vec3 irr = texture(uIrr, vec3(nOct, i)).rgb;
       float w = bf * vis * weight;
-      indirect += irr * w; tw += w;
+      indirect += irr * w; tw += w; norm += weight;
       indirectTri += irr * weight; twTri += weight;
       dbgBF += bf * weight; dbgVis += vis * weight;
     }
@@ -386,10 +393,10 @@ void main() {
     return;
   }
 
-  if (tw < 0.0001) {
+  if (norm < 0.0001) {
     indirect = (twTri > 0.0) ? (indirectTri / twTri) : vec3(0.0);
   } else {
-    indirect /= tw;
+    indirect /= norm;
   }
   vec3 color = indirect * albedo;
   fColor = vec4(color / (1.0 + color), 1.0);
