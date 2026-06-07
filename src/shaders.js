@@ -492,6 +492,28 @@ void main() {
 }
 `;
 
+// ─── Tetrahedron debug wireframe + probe points ───────────────────
+export const tetDebugVert = `#version 300 es
+precision highp float;
+layout(location=0) in vec3 aPos;
+uniform mat4 uVP;
+uniform mat4 uM;
+uniform float uPointSize;
+void main() {
+  gl_Position = uVP * uM * vec4(aPos, 1);
+  gl_PointSize = uPointSize;
+}
+`;
+
+export const tetDebugFrag = `#version 300 es
+precision highp float;
+uniform vec3 uColor;
+layout(location=0) out vec4 fColor;
+void main() {
+  fColor = vec4(uColor, 1.0);
+}
+`;
+
 // ─── Forward lit (per-mesh SH for tetrahedral mode) ─────────────
 export const forwardFrag = `#version 300 es
 precision highp float;
@@ -501,7 +523,7 @@ in vec3 vW;
 uniform vec3 uSH[9];
 uniform vec3 uLightPos;
 uniform vec3 uLightCol;
-uniform vec3 uAmbient;
+uniform float uShowIndirect;
 layout(location=0) out vec4 fColor;
 
 vec3 evalSH(vec3 dir) {
@@ -526,7 +548,13 @@ void main() {
   float atten = min(1.0 / (1.0 + distL * distL * 0.05), 1.0);
   vec3 direct = uLightCol * NdotL * atten;
   vec3 indirect = evalSH(N);
-  vec3 color = vC * (direct + indirect + uAmbient);
+  vec3 color;
+  if (uShowIndirect > 0.5) {
+    color = indirect;
+  } else {
+    vec3 direct = uLightCol * NdotL * atten;
+    color = vC * (direct + indirect);
+  }
   fColor = vec4(color / (1.0 + color), 1.0);
 }
 `;
@@ -581,6 +609,6 @@ void main() {
   vec3 direct = uLightCol * NdotL * atten;
   vec3 indirect = evalSH(N);
   vec3 color = uBaseCol * (direct + indirect);
-  fColor = vec4(color / (1.0 + color), 1.0);
+  fColor = vec4(indirect, 1.0);//vec4(color / (1.0 + color), 1.0);
 }
 `;

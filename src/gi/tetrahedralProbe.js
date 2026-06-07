@@ -85,8 +85,13 @@ function baryFromMatrix(P, v0, M) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export class TetrahedralProbeSystem extends IndirectLightingSystem {
-  constructor() {
+  constructor(cfg) {
     super();
+    cfg = cfg || {};
+    this.gridX = cfg.gridX || 2;
+    this.gridY = cfg.gridY || 2;
+    this.gridZ = cfg.gridZ || 2;
+    this.bounds = cfg.bounds || { min: [-3.5, -4, -2.5], max: [3.5, 3, 2.5] };
 
     /** @type {{pos:number[], sh:Float32Array}[]} */
     this.probes = [];
@@ -102,9 +107,7 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
 
     // Cache for temporal coherence
     this._tetIndex   = 0;
-    this._tetDirty   = true;  // reset to 0 on first query
-
-    // For showing which tet we're in
+    this._tetDirty   = true;
     this.lastBary   = null;
     this.lastTetIdx = -1;
   }
@@ -112,86 +115,67 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
   // ─── Initialisation ────────────────────────────────────────────────────
 
   init(gl, sceneData) {
-    this._buildTestData();
+    this._buildGrid();
     console.log(`[TET] ${this.probes.length} probes, ${this.tets.length} tetrahedra`);
   }
 
   /**
-   * Build 8 probes at box corners + 6 tetrahedra filling the box.
-   *
-   * The box spans the central scene volume:
-   *   x: [-3.5, 3.5]   y: [-4, 3]   z: [-2.5, 2.5]
-   *
-   * Probes:
-   *   0: (-3.5, -4, -2.5)  1: ( 3.5, -4, -2.5)
-   *   2: (-3.5,  3, -2.5)  3: ( 3.5,  3, -2.5)
-   *   4: (-3.5, -4,  2.5)  5: ( 3.5, -4,  2.5)
-   *   6: (-3.5,  3,  2.5)  7: ( 3.5,  3,  2.5)
-   *
-   * 6 tetrahedra (standard diagonal decomposition):
-   *   Each tet connects a triangular face of the box to the opposite
-   *   corner along the diagonal (0→7).
+   * Build a regular grid of tetrahedra covering the scene volume.
+   * Each grid cell is a box split into 6 tetrahedra (diagonal decomposition).
    */
-  _buildTestData() {
-    const P = [
-      [-3.5, -4, -2.5],
-      [ 3.5, -4, -2.5],
-      [-3.5,  3, -2.5],
-      [ 3.5,  3, -2.5],
-      [-3.5, -4,  2.5],
-      [ 3.5, -4,  2.5],
-      [-3.5,  3,  2.5],
-      [ 3.5,  3,  2.5],
+  _buildGrid() {
+    const { gridX, gridY, gridZ, bounds } = this;
+    const nx = gridX + 1, ny = gridY + 1, nz = gridZ + 1;
+    const bx = bounds.min, ex = bounds.max;
+    const sx = (ex[0] - bx[0]) / gridX;
+    const sy = (ex[1] - bx[1]) / gridY;
+    const sz = (ex[2] - bx[2]) / gridZ;
+
+    // Create probes at grid vertices
+    const idx = (ix, iy, iz) => iz * (nx * ny) + iy * nx + ix;
+    const numProbes = nx * ny * nz;
+    this.probes = new Array(numProbes);
+    for (let iz = 0; iz < nz; iz++)
+      for (let iy = 0; iy < ny; iy++)
+        for (let ix = 0; ix < nx; ix++)
+          this.probes[idx(ix, iy, iz)] = {
+            pos: [bx[0] + ix * sx, bx[1] + iy * sy, bx[2] + iz * sz],
+            sh: zeroSH(),
+          };
+
+    // Build all tet definitions (6 per cell)
+    const tetDefs = [];
+    const _6tets = (v) => [
+      { v: [v[0], v[1], v[3], v[7]] },
+      { v: [v[0], v[1], v[5], v[7]] },
+      { v: [v[0], v[2], v[3], v[7]] },
+      { v: [v[0], v[2], v[6], v[7]] },
+      { v: [v[0], v[4], v[5], v[7]] },
+      { v: [v[0], v[4], v[6], v[7]] },
     ];
 
-    // SH colours: natural indirect gradient — warmer near ceiling
-    // (light bounce), cooler at back, neutral at center.
-    // Each probe gets a distinct colour so interpolation is visible
-    // across the volume.
-    const cols = [
-      [0.20, 0.25, 0.35],  // 0: cool dark (bottom-left-front)
-      [0.20, 0.25, 0.35],  // 1: cool dark (bottom-right-front)
-      [0.45, 0.40, 0.30],  // 2: warm (top-left-front)
-      [0.45, 0.40, 0.30],  // 3: warm (top-right-front)
-      [0.15, 0.20, 0.40],  // 4: cool blue (bottom-left-back)
-      [0.15, 0.20, 0.40],  // 5: cool blue (bottom-right-back)
-      [0.35, 0.35, 0.45],  // 6: neutral-warm (top-left-back)
-      [0.35, 0.35, 0.45],  // 7: neutral-warm (top-right-back)
-    ];
+    for (let iz = 0; iz < gridZ; iz++)
+      for (let iy = 0; iy < gridY; iy++)
+        for (let ix = 0; ix < gridX; ix++) {
+          const v = [
+            idx(ix,   iy,   iz),   // 0
+            idx(ix+1, iy,   iz),   // 1
+            idx(ix,   iy+1, iz),   // 2
+            idx(ix+1, iy+1, iz),   // 3
+            idx(ix,   iy,   iz+1), // 4
+            idx(ix+1, iy,   iz+1), // 5
+            idx(ix,   iy+1, iz+1), // 6
+            idx(ix+1, iy+1, iz+1), // 7
+          ];
+          tetDefs.push(..._6tets(v));
+        }
 
-    this.probes = P.map((pos, i) => {
-      const [r, g, b] = cols[i];
-      const sh = zeroSH();
-      const dc = 1.0 / 0.282095;
-      sh[0] = r * dc;   // band 0 R
-      sh[1] = g * dc;   // band 0 G
-      sh[2] = b * dc;   // band 0 B
-      return { pos, sh };
-    });
-
-    // 6 tetrahedra — standard diagonal decomposition (diagonal 0→7)
-    const tetDefs = [
-      { v: [0, 1, 3, 7] },
-      { v: [0, 1, 5, 7] },
-      { v: [0, 2, 3, 7] },
-      { v: [0, 2, 6, 7] },
-      { v: [0, 4, 5, 7] },
-      { v: [0, 4, 6, 7] },
-    ];
-
-    // Build neighbour adjacency:
-    //   Tet 0 (v:0,1,2,4) shares face (0,1,2) with no-one; shares (0,1,4) with tet1;
-    //   vertex 2 is not in tet1 → neighbour[2] = 1
-    //   vertex 3 is not in tet0 → neighbour of tet1 at position of v=3 = 0
-    // We need to figure out which vertex is opposite each face.
-
-    // Helper: for each tet, find which neighbour shares the face opposite vertex k
+    // Neighbour adjacency
     const findOpposite = (tets, ti, k) => {
-      const face = tets[ti].v.filter((_, i) => i !== k);  // 3 vertices of the face
+      const face = tets[ti].v.filter((_, i) => i !== k);
       for (let ni = 0; ni < tets.length; ni++) {
         if (ni === ti) continue;
         const ov = tets[ni].v;
-        // Check if all 3 face vertices are in this neighbour
         if (face.every(v => ov.includes(v))) return ni;
       }
       return -1;
@@ -199,9 +183,10 @@ export class TetrahedralProbeSystem extends IndirectLightingSystem {
 
     this.tets = tetDefs.map((d, i) => {
       const n = d.v.map((_, k) => findOpposite(tetDefs, i, k));
-      const v0 = P[d.v[0]], v1 = P[d.v[1]], v2 = P[d.v[2]], v3 = P[d.v[3]];
+      const pos = this.probes;
+      const v0 = pos[d.v[0]].pos, v1 = pos[d.v[1]].pos, v2 = pos[d.v[2]].pos, v3 = pos[d.v[3]].pos;
       const M = computeTetMatrix(v0, v1, v2, v3);
-      return { v: d.v, n, M };
+      return { v: [...d.v], n, M };
     });
   }
 
